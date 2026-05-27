@@ -1,9 +1,15 @@
-import type {
-  DriftReport,
-  DriftedFile,
-  OutputFormat,
-  RiskLevel,
-} from "./types.js";
+import type { DriftReport, OutputFormat } from "./types.js";
+import {
+  COL,
+  DIVIDER_WIDTH,
+  riskEmoji,
+  summaryAdvice,
+  formatLineRanges,
+  pad,
+  padLeft,
+  truncate,
+  formatPct,
+} from "./format.js";
 
 export interface ReporterOptions {
   format: OutputFormat;
@@ -21,11 +27,8 @@ export function render(report: DriftReport, options: ReporterOptions): string {
   }
 }
 
-const COL = { file: 48, pr: 10, main: 12, overlap: 9, risk: 6 };
-const DIVIDER_WIDTH = COL.file + COL.pr + COL.main + COL.overlap + COL.risk + 4;
-
 function renderTable(report: DriftReport, verbose: boolean): string {
-  const { prInfo: pr, driftedFiles, cleanFiles, prFiles } = report;
+  const { prInfo: pr, driftedFiles, prFiles } = report;
   const lines: string[] = [];
 
   lines.push(`PR #${pr.number}: ${pr.title}`);
@@ -43,7 +46,6 @@ function renderTable(report: DriftReport, verbose: boolean): string {
     `⚠️  Drift detected in ${driftedFiles.length} of ${prFiles.length} file(s) (${pct}%)\n`,
   );
 
-  // Header row
   lines.push(
     pad("FILE", COL.file) +
       " " +
@@ -58,18 +60,17 @@ function renderTable(report: DriftReport, verbose: boolean): string {
   lines.push("─".repeat(DIVIDER_WIDTH));
 
   for (const f of driftedFiles) {
-    const fname = truncate(f.filename, COL.file);
-    const row =
-      pad(fname, COL.file) +
-      " " +
-      padLeft(String(f.prChanges), COL.pr) +
-      " " +
-      padLeft(String(f.mainChanges), COL.main) +
-      " " +
-      padLeft(formatPct(f.overlapScore), COL.overlap) +
-      " " +
-      `${riskEmoji(f.risk)} ${f.risk}`;
-    lines.push(row);
+    lines.push(
+      pad(truncate(f.filename, COL.file), COL.file) +
+        " " +
+        padLeft(String(f.prChanges), COL.pr) +
+        " " +
+        padLeft(String(f.mainChanges), COL.main) +
+        " " +
+        padLeft(formatPct(f.overlapScore), COL.overlap) +
+        " " +
+        `${riskEmoji(f.risk)} ${f.risk}`,
+    );
 
     if (verbose && f.overlapLines.length > 0) {
       lines.push(
@@ -83,9 +84,16 @@ function renderTable(report: DriftReport, verbose: boolean): string {
   }
 
   lines.push("");
-  lines.push(summaryAdvice(report.driftedFiles));
+  lines.push(summaryAdvice(driftedFiles));
   return lines.join("\n");
 }
+
+const MD_HEADER = "| File | PR lines | Main lines | Overlap | Risk |";
+const MD_SEPARATOR = "|------|----------|------------|---------|------|";
+const MD_HEADER_AI =
+  "| File | PR lines | Main lines | Overlap | Risk | AI insight |";
+const MD_SEPARATOR_AI =
+  "|------|----------|------------|---------|------|------------|";
 
 function renderMarkdown(report: DriftReport): string {
   const { prInfo: pr, driftedFiles, prFiles } = report;
@@ -107,15 +115,8 @@ function renderMarkdown(report: DriftReport): string {
   );
 
   const hasAiInsights = driftedFiles.some((f) => f.aiInsight);
-  const headerRow = hasAiInsights
-    ? "| File | PR lines | Main lines | Overlap | Risk | AI insight |"
-    : "| File | PR lines | Main lines | Overlap | Risk |";
-  const separatorRow = hasAiInsights
-    ? "|------|----------|------------|---------|------|------------|"
-    : "|------|----------|------------|---------|------|";
-
-  lines.push(headerRow);
-  lines.push(separatorRow);
+  lines.push(hasAiInsights ? MD_HEADER_AI : MD_HEADER);
+  lines.push(hasAiInsights ? MD_SEPARATOR_AI : MD_SEPARATOR);
 
   for (const f of driftedFiles) {
     const aiCol = hasAiInsights ? ` ${f.aiInsight ?? "—"} |` : "";
@@ -139,9 +140,6 @@ function renderMarkdown(report: DriftReport): string {
 function renderJson(report: DriftReport): string {
   const { prInfo: pr, driftedFiles, cleanFiles, prFiles } = report;
 
-  const highestRisk =
-    driftedFiles.length === 0 ? "none" : (driftedFiles[0].risk as string); // already sorted by risk
-
   const payload = {
     pr: {
       number: pr.number,
@@ -155,7 +153,7 @@ function renderJson(report: DriftReport): string {
       driftPercentage: parseFloat(
         ((driftedFiles.length / prFiles.length) * 100).toFixed(1),
       ),
-      highestRisk,
+      highestRisk: driftedFiles.length === 0 ? "none" : driftedFiles[0].risk,
     },
     drifted: driftedFiles.map((f) => ({
       filename: f.filename,
@@ -170,63 +168,4 @@ function renderJson(report: DriftReport): string {
   };
 
   return JSON.stringify(payload, null, 2);
-}
-
-export function riskEmoji(risk: RiskLevel): string {
-  return { high: "🔴", medium: "🟡", low: "🟢" }[risk];
-}
-
-export function summaryAdvice(driftedFiles: DriftedFile[]): string {
-  if (driftedFiles.length === 0) return "No drift detected.";
-
-  const highest = driftedFiles[0].risk; // sorted, so first = worst
-  if (highest === "high") {
-    return (
-      "High-risk drift found. Re-read the drifted files on main before requesting review. " +
-      "Consider rebasing to resolve conflicts early."
-    );
-  }
-  if (highest === "medium") {
-    return (
-      "Moderate drift detected. These files changed on both branches — " +
-      "verify the logic is still consistent after merge."
-    );
-  }
-  return "Low-risk drift. Files overlap slightly but changes appear minimal.";
-}
-
-export function formatLineRanges(lines: number[]): string {
-  if (lines.length === 0) return "";
-
-  const ranges: string[] = [];
-  let start = lines[0];
-  let end = lines[0];
-
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i] === end + 1) {
-      end = lines[i];
-    } else {
-      ranges.push(start === end ? `${start}` : `${start}-${end}`);
-      start = end = lines[i];
-    }
-  }
-  ranges.push(start === end ? `${start}` : `${start}-${end}`);
-
-  return ranges.join(", ");
-}
-
-function pad(s: string, width: number): string {
-  return s.padEnd(width);
-}
-
-function padLeft(s: string, width: number): string {
-  return s.padStart(width);
-}
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? `…${s.slice(-(max - 1))}` : s;
-}
-
-function formatPct(score: number): string {
-  return `${(score * 100).toFixed(0)}%`;
 }
